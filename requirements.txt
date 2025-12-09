@@ -1,0 +1,14 @@
+# Core runtime
+numpy>=1.24
+
+# Open3D with GUI support (visualization.gui/rendering)
+# Pin to a recent release known to ship GUI in pip wheels.
+# Verify after install: `python -c "import open3d.visualization.gui as gui; import open3d.visualization.rendering as rendering"`
+open3d==0.19.0
+
+# Mesh/point cloud utilities (optional but recommended)
+trimesh>=4.0
+Pillow>=10.0
+
+# GLTF helpers (optional; Open3D reads GLTF/GLB directly, this is only for edge cases)
+pygltflib>=1.15
