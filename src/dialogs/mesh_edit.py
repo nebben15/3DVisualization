@@ -34,6 +34,25 @@ class MeshEditWindow:
         chk.set_on_checked(_on_chk)
         self._container.add_child(chk)
 
+        # Scale slider (double) for meshes/pcd
+        self._container.add_child(gui.Label("Scale"))
+        sld = gui.Slider(gui.Slider.DOUBLE)
+        sld.set_limits(0.1, 3.0)
+        try:
+            sld.double_value = float(self._entry.get("options", {}).get("scale", 1.0))
+        except Exception:
+            sld.double_value = 1.0
+
+        def _on_scale(_val):
+            try:
+                self._entry.setdefault("options", {})["scale"] = float(sld.double_value)
+            except Exception:
+                pass
+            self._apply_change(self._entry)
+
+        sld.set_on_value_changed(_on_scale)
+        self._container.add_child(sld)
+
     # No extra Close button; window has a native close control.
 
 

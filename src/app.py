@@ -139,6 +139,8 @@ class VisualizationApp:
 		self.panel.add_child(gui.Label("Light Elevation (deg)"))
 		self.panel.add_child(self.sld_light_el)
 
+		# Scale control moved to Edit dialog
+
 		# Layout
 		self.window.set_on_layout(self._on_layout)
 		self.window.add_child(self.panel)
@@ -148,24 +150,17 @@ class VisualizationApp:
 		# State
 		self.geometry = None
 		self.is_pointcloud = False
-		self.features = None  # np.ndarray (N, D)
-		self.category_mapping = None  # placeholder (categorical mapping disabled)
-
-		# Initialize sun light from sliders if available
-		try:
-			self._apply_light()
-			self.scene.scene.enable_sun_light(True)
-		except Exception:
-			pass
-
-			# Build initial empty list UI
-		self._rebuild_geom_list_ui()
-
-	def _on_light_changed(self, _val):
-		self._apply_light()
-
-	def _apply_light(self):
-		# Convert azimuth/elevation to a unit direction vector and apply.
+		self.features = None
+		# Use registry service to scan directories for supported geometry files
+		infos = scan_directories(self.source_dirs)
+		# Store as (display, path, type) for accurate type handling (mesh vs pcd)
+		self.geom_index = [(gi.display, gi.path, gi.type) for gi in infos]
+		self.cmb_geometry.clear_items()
+		# Use plain ASCII to avoid font fallback showing question marks
+		self.cmb_geometry.add_item("Select to add")
+		for disp, _path, _type in self.geom_index:
+			self.cmb_geometry.add_item(disp)
+		self.cmb_geometry.selected_index = 0
 		# Fallback: rotate indirect light (IBL) by azimuth if sun light API is unavailable.
 		az_deg = float(self.sld_light_az.int_value)
 		try:
@@ -229,6 +224,29 @@ class VisualizationApp:
 			# Do not auto-load to avoid popping error dialogs on startup.
 			# User can pick from the dropdown to load.
 
+	def _on_light_changed(self, _val):
+		# React to slider changes by applying light settings
+		self._apply_light()
+
+	def _apply_light(self):
+		# Convert azimuth/elevation to a unit direction vector and apply sun light if available.
+		az_deg = float(getattr(self.sld_light_az, 'int_value', 45))
+		el_deg = float(getattr(self.sld_light_el, 'int_value', 30))
+		try:
+			az = az_deg * np.pi / 180.0
+			sel = el_deg * np.pi / 180.0
+			cx = np.cos(sel)
+			dir_vec = [cx * np.cos(az), cx * np.sin(az), np.sin(sel)]
+			self.scene.scene.set_sun_light(dir_vec, [1.0, 1.0, 1.0], 75000)
+			return
+		except Exception:
+			pass
+		# Fallback: rotate indirect light (IBL) by azimuth
+		try:
+			self.scene.scene.set_indirect_light_rotation(az_deg)
+		except Exception:
+			return
+
 	def _on_add_folder(self):
 		# Use file dialog to pick a file; add its directory
 		dlg = gui.FileDialog(gui.FileDialog.OPEN, "Select any file in folder to add", self.window.theme)
@@ -245,41 +263,68 @@ class VisualizationApp:
 	def _on_add_selected_from_dropdown(self, *_args):
 		# Selecting from the dropdown adds to the list (acts as "Add Geometry")
 		idx = self.cmb_geometry.selected_index
-		# Index 0 is the empty option; ignore
 		if idx <= 0:
 			return
-		# Adjust for the empty option at index 0
 		adj_idx = idx - 1
 		if 0 <= adj_idx < len(self.geom_index):
-			display, path = self.geom_index[adj_idx]
-			ext = Path(path).suffix.lower()
-			gtype = 'pcd' if ext in {'.ply', '.pcd', '.xyz'} else 'mesh'
-			entry = {
-				"display": display,
-				"path": path,
-				"type": gtype,
-				"options": {
-					"wireframe": bool(self.default_wireframe),
-				}
-			}
-			self.selected_geoms.append(entry)
-			# Rebuild UI and render on main thread to avoid GUI reentrancy issues
-			gui.Application.instance.post_to_main_thread(self.window, lambda: (self._rebuild_geom_list_ui(), self._render_selected_lineup()))
-			# Reset dropdown to empty default on main thread
+			display, path, gtype = self.geom_index[adj_idx]
+			# Add to selection model
+			self.selection.add(SelectedEntry(display=display, path=path, type=gtype, options={
+				"wireframe": bool(self.default_wireframe),
+				"scale": 1.0,
+			}))
+			# Update current selection index to the newly added item
+			self.sel_index = len(self.selection.items) - 1 if self.selection.items else -1
+			gui.Application.instance.post_to_main_thread(self.window, lambda: (self._rebuild_geom_list_ui(), self._render_selected_lineup(camera_preserve=False)))
 			gui.Application.instance.post_to_main_thread(self.window, lambda: setattr(self.cmb_geometry, 'selected_index', 0))
+			gui.Application.instance.post_to_main_thread(self.window, lambda: self._sync_controls())
 
 	# Deprecated button-based add kept out per new UX
 
 	def _on_clear_selected(self):
-		self.selected_geoms.clear()
+		self.selection.items.clear()
+		self.sel_index = -1
 		self._clear_scene()
 		self._rebuild_geom_list_ui()
+
+	def _move_selected(self, delta: int):
+		# Move currently selected entry up/down by delta (selection model)
+		idx = self.sel_index
+		new_idx = idx + delta
+		if 0 <= idx < len(self.selection.items) and 0 <= new_idx < len(self.selection.items):
+			self.selection.move(idx, delta)
+			self.sel_index = new_idx
+			self._rebuild_geom_list_ui()
+			self._render_selected_lineup(camera_preserve=True)
+			self._sync_controls()
+
+	def _remove_selected(self):
+		# Remove currently selected entry (selection model)
+		idx = self.sel_index
+		if 0 <= idx < len(self.selection.items):
+			self.selection.remove_at(idx)
+			# Adjust selection
+			if not self.selection.items:
+				self.sel_index = -1
+			elif idx >= len(self.selection.items):
+				self.sel_index = len(self.selection.items) - 1
+			# Close edit window if open
+			try:
+				if getattr(self, "_last_edit_window", None):
+					win = getattr(self._last_edit_window, "_win", None) or self._last_edit_window
+					gui.Application.instance.close_window(win)
+					self._last_edit_window = None
+			except Exception:
+				self._last_edit_window = None
+			self._rebuild_geom_list_ui()
+			self._render_selected_lineup(camera_preserve=False)
+			self._sync_controls()
 
 	# Per-entry options handled via list UI
 
 	def _rebuild_geom_list_ui(self):
 		# Update ListView items and sync controls visibility
-		items = [e["display"] for e in self.selected_geoms]
+		items = [e.display for e in self.selection.items]
 		try:
 			self.list_view.set_items(items)
 		except Exception:
@@ -287,20 +332,18 @@ class VisualizationApp:
 			self.list_view.set_items([])
 			self.list_view.set_items(items)
 		# Keep selection in range
-		if not (0 <= self.sel_index < len(self.selected_geoms)):
-			self.sel_index = -1 if not self.selected_geoms else 0
+		if not (0 <= self.sel_index < len(self.selection.items)):
+			self.sel_index = -1 if not self.selection.items else 0
 		try:
 			self.list_view.selected_index = self.sel_index if self.sel_index >= 0 else -1
-		except Exception:
-			pass
-		self._sync_controls()
-		try:
 			self.window.set_needs_layout()
 		except Exception:
 			pass
+		# Ensure controls reflect current selection state
+		self._sync_controls()
 
 	def _on_list_selection_changed(self, *args):
-		# Determine selected index from callback or widget state
+		# Sync selected index from ListView callback or widget state
 		idx = -1
 		try:
 			if args:
@@ -312,32 +355,27 @@ class VisualizationApp:
 		self.sel_index = idx
 		self._sync_controls()
 
-	# removed old dynamic panel function
-
-	def _move_selected(self, delta: int):
-		idx = self.sel_index
-		new_idx = idx + delta
-		if 0 <= idx < len(self.selected_geoms) and 0 <= new_idx < len(self.selected_geoms):
-			self.selected_geoms[idx], self.selected_geoms[new_idx] = self.selected_geoms[new_idx], self.selected_geoms[idx]
-			self.sel_index = new_idx
-			self._rebuild_geom_list_ui()
-			self._render_selected_lineup()
-
-	def _remove_selected(self):
-		idx = self.sel_index
-		if 0 <= idx < len(self.selected_geoms):
-			self.selected_geoms.pop(idx)
-			# Adjust selection
-			if not self.selected_geoms:
-				self.sel_index = -1
-			elif idx >= len(self.selected_geoms):
-				self.sel_index = len(self.selected_geoms) - 1
-			self._rebuild_geom_list_ui()
-			self._render_selected_lineup()
+	def _render_selected_lineup(self, camera_preserve: bool = False):
+		# Use selection model entries
+		entries = self.selection.items
+		# Resolve point size
+		try:
+			point_size = float(getattr(self, 'default_point_size', 3.0))
+		except Exception:
+			point_size = 3.0
+		# Delegate rendering
+		render_lineup(self.scene.scene, entries, point_size, preserve_camera=camera_preserve)
+		# Fit camera if not preserved
+		if not camera_preserve:
+			try:
+				bounds = self.scene.scene.bounding_box
+				self.scene.setup_camera(60.0, bounds, bounds.get_center())
+			except Exception:
+				pass
 
 	def _sync_controls(self):
 		# Enable/disable the fixed controls row based on selection and position
-		N = len(self.selected_geoms)
+		N = len(self.selection.items)
 		idx = self.sel_index
 		en_has_sel = 0 <= idx < N
 		try:
@@ -345,6 +383,7 @@ class VisualizationApp:
 			self.btn_edit.enabled = bool(en_has_sel)
 			self.btn_up.enabled = bool(en_has_sel and idx > 0)
 			self.btn_down.enabled = bool(en_has_sel and idx < N - 1)
+			# No inline wireframe checkbox; wireframe is controlled via Edit dialog
 		except Exception:
 			pass
 		try:
@@ -469,56 +508,6 @@ class VisualizationApp:
 			self._show_message(f"Error loading point cloud: {e}")
 
 
-	def _render_selected_lineup(self):
-		# Clear scene and render each selected geometry side-by-side along +X
-		self.scene.scene.clear_geometry()
-		offset_x = 0.0
-		gap = 1.5  # spacing between items
-		for i, entry in enumerate(self.selected_geoms):
-			path = entry["path"]
-			gtype = entry["type"]
-			wire = entry["options"].get("wireframe", False)
-			name = f"geom_{i}"
-			try:
-				if gtype == 'pcd':
-					pcd = o3d.io.read_point_cloud(path)
-					if pcd is None or pcd.is_empty():
-						continue
-					# translate by offset
-					pcd.translate([offset_x, 0.0, 0.0])
-					mat = rendering.MaterialRecord()
-					mat.point_size = float(self.default_point_size)
-					self.scene.scene.add_geometry(name, pcd, mat)
-				else:
-					mesh = o3d.io.read_triangle_mesh(path)
-					if mesh is None or mesh.is_empty():
-						continue
-					mesh.compute_vertex_normals()
-					mesh.translate([offset_x, 0.0, 0.0])
-					mat = rendering.MaterialRecord()
-					if wire:
-						mat.shader = "unlitLine"
-					else:
-						mat.shader = "defaultLit"
-						mat.base_color = [0.8, 0.8, 0.85, 1.0]
-					self.scene.scene.add_geometry(name, mesh, mat)
-				# advance offset by bounding box width + gap
-				bb = None
-				if gtype == 'pcd':
-					bb = pcd.get_axis_aligned_bounding_box()
-				else:
-					bb = mesh.get_axis_aligned_bounding_box()
-				w = (bb.get_max_bound() - bb.get_min_bound())[0]
-				offset_x += w + gap
-			except Exception as e:
-				self._show_message(f"Render lineup error for {path}: {e}")
-		# Fit camera to all
-		try:
-			bounds = self.scene.scene.bounding_box
-			self.scene.setup_camera(60.0, bounds, bounds.get_center())
-		except Exception:
-			pass
-
 
 	def _on_mouse(self, event):
 		if event.type == gui.MouseEvent.Type.MOVE and self.is_pointcloud and self.geometry is not None:
@@ -531,21 +520,27 @@ class VisualizationApp:
 	def _open_edit_dialog(self):
 		# Open a movable editor window via dialogs.mesh_edit
 		idx = self.sel_index
-		if not (0 <= idx < len(self.selected_geoms)):
+		if not (0 <= idx < len(self.selection.items)):
 			return
-		entry = self.selected_geoms[idx]
-		def _apply_change(_entry):
-			# re-render lineup after any change
-			self._render_selected_lineup()
+		entry = self.selection.items[idx]
+		def _apply_change(updated_entry_dict):
+			# Update model options from dialog and re-render
+			options = dict(updated_entry_dict.get("options", {}))
+			self.selection.update_options(idx, **options)
+			self._render_selected_lineup(camera_preserve=True)
+		# Prepare legacy-like dict for dialog
+		legacy_like = {
+			"display": entry.display,
+			"path": entry.path,
+			"type": entry.type,
+			"options": dict(entry.options),
+		}
 		# Keep reference to prevent GC
-		self._last_edit_window = mesh_edit.open_mesh_edit_window(gui.Application.instance, self.window, entry, _apply_change)
+		self._last_edit_window = mesh_edit.open_mesh_edit_window(gui.Application.instance, self.window, legacy_like, _apply_change)
 
 	def _on_selected_wireframe(self, _checked):
-		# Update currently selected mesh wireframe option from the fixed checkbox (if used)
-		idx = self.sel_index
-		if 0 <= idx < len(self.selected_geoms) and self.selected_geoms[idx]["type"] == "mesh":
-			self.selected_geoms[idx]["options"]["wireframe"] = bool(self.chk_wireframe_sel.checked)
-			self._render_selected_lineup()
+		# Deprecated: wireframe is controlled via Edit dialog only
+		return
 
 	def _show_message(self, msg: str):
 		# Avoid modal dialogs that can obscure the UI; log to console for now.

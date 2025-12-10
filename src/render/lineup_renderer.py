@@ -48,16 +48,26 @@ def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_s
                     pass
                 mesh.translate([offset_x, 0.0, 0.0])
                 if bool(entry.options.get("wireframe", False)):
+                    # Render lit mesh AND a line overlay for wireframe clarity
+                    try:
+                        # base shaded mesh for context
+                        mat_mesh = rendering.MaterialRecord()
+                        mat_mesh.shader = "defaultLit"
+                        mat_mesh.base_color = [0.75, 0.75, 0.8, 1.0]
+                        scene.add_geometry(f"{name}_mesh", mesh, mat_mesh)
+                    except Exception:
+                        pass
                     lines = to_lineset(mesh)
                     if lines:
                         mat = rendering.MaterialRecord()
                         mat.shader = "unlitLine"
                         mat.line_width = 1.0
-                        scene.add_geometry(name, lines, mat)
+                        scene.add_geometry(f"{name}_wire", lines, mat)
                     else:
+                        # fallback: render mesh in line mode if LineSet unavailable
                         mat = rendering.MaterialRecord()
                         mat.shader = "unlitLine"
-                        scene.add_geometry(name, mesh, mat)
+                        scene.add_geometry(f"{name}_wire", mesh, mat)
                 else:
                     mat = rendering.MaterialRecord()
                     mat.shader = "defaultLit"
