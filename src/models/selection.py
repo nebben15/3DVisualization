@@ -9,7 +9,13 @@ class SelectedEntry:
     display: str
     path: str
     type: GeometryType
-    options: Dict[str, object] = field(default_factory=lambda: {"wireframe": False, "scale": 1.0})
+    options: Dict[str, object] = field(default_factory=lambda: {
+        "wireframe": False,
+        "scale": 1.0,
+        "visible": True,
+        "texture": None,
+        "texture_enabled": True,
+    })
 
 
 class SelectionList:

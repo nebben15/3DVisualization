@@ -129,6 +129,10 @@ class VisualizationApp:
 		self.controls_row.add_child(self.btn_down)
 		self.controls_row.add_child(self.btn_remove)
 		self.controls_row.add_child(self.btn_edit)
+		# Hide/Show toggle for selected entry
+		self.btn_toggle_visible = gui.Button("Hide")
+		self.btn_toggle_visible.set_on_clicked(self._on_toggle_visible)
+		self.controls_row.add_child(self.btn_toggle_visible)
 		self.controls_row.add_stretch()
 		self.panel.add_child(self.controls_row)
 		# Controls row will sit below the list
@@ -272,6 +276,9 @@ class VisualizationApp:
 			self.selection.add(SelectedEntry(display=display, path=path, type=gtype, options={
 				"wireframe": bool(self.default_wireframe),
 				"scale": 1.0,
+				"visible": True,
+				"texture": None,
+				"texture_enabled": True,
 			}))
 			# Update current selection index to the newly added item
 			self.sel_index = len(self.selection.items) - 1 if self.selection.items else -1
@@ -342,6 +349,14 @@ class VisualizationApp:
 		# Ensure controls reflect current selection state
 		self._sync_controls()
 
+	def _on_toggle_visible(self):
+		idx = self.sel_index
+		if 0 <= idx < len(self.selection.items):
+			vis = bool(self.selection.items[idx].options.get("visible", True))
+			self.selection.update_options(idx, visible=not vis)
+			self._render_selected_lineup(camera_preserve=True)
+			self._sync_controls()
+
 	def _on_list_selection_changed(self, *args):
 		# Sync selected index from ListView callback or widget state
 		idx = -1
@@ -381,6 +396,10 @@ class VisualizationApp:
 		try:
 			self.btn_remove.enabled = bool(en_has_sel)
 			self.btn_edit.enabled = bool(en_has_sel)
+			self.btn_toggle_visible.enabled = bool(en_has_sel)
+			if en_has_sel:
+				vis = bool(self.selection.items[idx].options.get("visible", True))
+				self.btn_toggle_visible.text = "Hide" if vis else "Show"
 			self.btn_up.enabled = bool(en_has_sel and idx > 0)
 			self.btn_down.enabled = bool(en_has_sel and idx < N - 1)
 			# No inline wireframe checkbox; wireframe is controlled via Edit dialog
