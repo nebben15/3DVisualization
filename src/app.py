@@ -7,6 +7,10 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 
+from models.selection import SelectionList, SelectedEntry
+from services.geometry_registry import scan_directories
+from render.lineup_renderer import render as render_lineup
+
 try:
 	# local dialog modules
 	from .dialogs import mesh_edit
@@ -45,18 +49,19 @@ class VisualizationApp:
 		margin = int(round(0.5 * em))
 		self.panel = gui.Vert(0, gui.Margins(margin, margin, margin, margin))
 
-		# Geometry sources: directories to scrape and discovered geometry list
+		# Geometry sources and dropdown
 		self.source_dirs = self._init_default_dirs()
-		self.geom_index = []  # list of (display_name, full_path)
+		self.geom_index = []  # list of GeometryInfo
 		self.cmb_geometry = gui.Combobox()
-		# Acts as "Add Geometry" dropdown: selecting immediately adds to list
+			# Acts as "Add Geometry" dropdown: selecting immediately adds to list
 		self.cmb_geometry.set_on_selection_changed(self._on_add_selected_from_dropdown)
-		# Selected geometries management
-		self.selected_geoms = []  # list of dicts: {path, type: 'mesh'|'pcd', options}
-		# ListView to show current selected geometries
+		# Selected geometries model
+		self.selection = SelectionList()
+			# ListView to show current selected geometries
 		self.list_view = gui.ListView()
 		self.list_view.set_items([])
 		self.list_view.set_on_selection_changed(self._on_list_selection_changed)
+		# Initialize selection index
 		self.sel_index = -1
 		# Controls for selected entry
 		# Use ASCII labels to avoid font issues with arrows on some builds
@@ -95,7 +100,8 @@ class VisualizationApp:
 		self.sld_light_az.set_on_value_changed(self._on_light_changed)
 		self.sld_light_el.set_on_value_changed(self._on_light_changed)
 
-		# Assemble panel
+		# Backward compatibility: keep selected_geoms list while migrating to SelectionList
+		self.selected_geoms = []
 		self.panel.add_child(gui.Label("Sources"))
 		row_title = gui.Horiz()
 		row_title.add_child(gui.Label("Add Geometry"))
@@ -152,7 +158,7 @@ class VisualizationApp:
 		except Exception:
 			pass
 
-		# Build initial empty list UI
+			# Build initial empty list UI
 		self._rebuild_geom_list_ui()
 
 	def _on_light_changed(self, _val):
