@@ -7,6 +7,13 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 
+try:
+	# local dialog modules
+	from .dialogs import mesh_edit
+except Exception:
+	# fallback when running as script
+	from dialogs import mesh_edit
+
 
 try:
 	from . import config as viz_config  # when running as a module
@@ -46,24 +53,34 @@ class VisualizationApp:
 		self.cmb_geometry.set_on_selection_changed(self._on_add_selected_from_dropdown)
 		# Selected geometries management
 		self.selected_geoms = []  # list of dicts: {path, type: 'mesh'|'pcd', options}
-		# List to show current selected geometries (no ScrollView on this build)
-		self.geom_list_container = gui.Vert(0, gui.Margins(0, 0, 0, 0))
+		# ListView to show current selected geometries
+		self.list_view = gui.ListView()
+		self.list_view.set_items([])
+		self.list_view.set_on_selection_changed(self._on_list_selection_changed)
+		self.sel_index = -1
+		# Controls for selected entry
+		# Use ASCII labels to avoid font issues with arrows on some builds
+		self.btn_up = gui.Button("Up")
+		self.btn_down = gui.Button("Down")
+		self.btn_remove = gui.Button("Remove")
+		self.chk_wireframe_sel = gui.Checkbox("Wireframe (mesh)")
+		self.btn_up.set_on_clicked(lambda: self._move_selected(-1))
+		self.btn_down.set_on_clicked(lambda: self._move_selected(1))
+		self.btn_remove.set_on_clicked(self._remove_selected)
+		self.chk_wireframe_sel.set_on_checked(self._on_selected_wireframe)
 		self.btn_clear_selected = gui.Button("Clear All")
 		self.btn_clear_selected.set_on_clicked(self._on_clear_selected)
 		# Simple default option: wireframe for meshes (per-entry toggled via list)
 		self.default_wireframe = False
-		self.btn_add_folder = gui.Button("Add Folder…")
+		self.btn_add_folder = gui.Button("Add Folder")
 		self.btn_add_folder.set_on_clicked(self._on_add_folder)
 		self.btn_refresh = gui.Button("Refresh List")
 		self.btn_refresh.set_on_clicked(self._refresh_geometry_list)
 		# Initial scrape
 		self._refresh_geometry_list()
 
-		# Point size slider (kept minimal for visibility of point clouds)
-		self.sld_point_size = gui.Slider(gui.Slider.INT)
-		self.sld_point_size.set_limits(1, 10)
-		self.sld_point_size.int_value = 3
-		self.sld_point_size.set_on_value_changed(self._on_point_size_change)
+		# Default point size for point clouds
+		self.default_point_size = 3.0
 
 		# Hover info
 		self.scene.set_on_mouse(self._on_mouse)
@@ -96,10 +113,19 @@ class VisualizationApp:
 		# Spacer
 		self.panel.add_child(gui.Label(""))
 		self.panel.add_child(gui.Label("Selected Geometries"))
-		self.panel.add_child(self.geom_list_container)
-		self.panel.add_child(gui.Label(""))
-		self.panel.add_child(gui.Label("Point Size"))
-		self.panel.add_child(self.sld_point_size)
+		self.panel.add_child(self.list_view)
+		# Controls row (always visible) for selected geometry actions
+		self.controls_row = gui.Horiz()
+		# Add buttons: Up, Down, Remove, Edit
+		self.btn_edit = gui.Button("Edit")
+		self.btn_edit.set_on_clicked(self._open_edit_dialog)
+		self.controls_row.add_child(self.btn_up)
+		self.controls_row.add_child(self.btn_down)
+		self.controls_row.add_child(self.btn_remove)
+		self.controls_row.add_child(self.btn_edit)
+		self.controls_row.add_stretch()
+		self.panel.add_child(self.controls_row)
+		# Controls row will sit below the list
 		# Light controls UI
 		self.panel.add_child(gui.Label(""))
 		self.panel.add_child(gui.Label("Light Azimuth (deg)"))
@@ -110,6 +136,8 @@ class VisualizationApp:
 		# Layout
 		self.window.set_on_layout(self._on_layout)
 		self.window.add_child(self.panel)
+		# Initialize controls state
+		self._sync_controls()
 
 		# State
 		self.geometry = None
@@ -186,10 +214,12 @@ class VisualizationApp:
 		# Update UI
 		self.geom_index = items
 		self.cmb_geometry.clear_items()
+		# Add an empty default option that does nothing when selected
+		self.cmb_geometry.add_item("Select to add")
 		for disp, _ in items:
 			self.cmb_geometry.add_item(disp)
-		if items:
-			self.cmb_geometry.selected_index = 0
+		# Default to empty option
+		self.cmb_geometry.selected_index = 0
 			# Do not auto-load to avoid popping error dialogs on startup.
 			# User can pick from the dropdown to load.
 
@@ -209,8 +239,13 @@ class VisualizationApp:
 	def _on_add_selected_from_dropdown(self, *_args):
 		# Selecting from the dropdown adds to the list (acts as "Add Geometry")
 		idx = self.cmb_geometry.selected_index
-		if 0 <= idx < len(self.geom_index):
-			display, path = self.geom_index[idx]
+		# Index 0 is the empty option; ignore
+		if idx <= 0:
+			return
+		# Adjust for the empty option at index 0
+		adj_idx = idx - 1
+		if 0 <= adj_idx < len(self.geom_index):
+			display, path = self.geom_index[adj_idx]
 			ext = Path(path).suffix.lower()
 			gtype = 'pcd' if ext in {'.ply', '.pcd', '.xyz'} else 'mesh'
 			entry = {
@@ -224,6 +259,8 @@ class VisualizationApp:
 			self.selected_geoms.append(entry)
 			# Rebuild UI and render on main thread to avoid GUI reentrancy issues
 			gui.Application.instance.post_to_main_thread(self.window, lambda: (self._rebuild_geom_list_ui(), self._render_selected_lineup()))
+			# Reset dropdown to empty default on main thread
+			gui.Application.instance.post_to_main_thread(self.window, lambda: setattr(self.cmb_geometry, 'selected_index', 0))
 
 	# Deprecated button-based add kept out per new UX
 
@@ -235,80 +272,103 @@ class VisualizationApp:
 	# Per-entry options handled via list UI
 
 	def _rebuild_geom_list_ui(self):
-		# Clear container and rebuild rows representing selected_geoms
-		# Some Open3D builds don't expose clear_children; remove manually.
-		# Remove existing children safely, keep container anchored under its label
+		# Update ListView items and sync controls visibility
+		items = [e["display"] for e in self.selected_geoms]
 		try:
-			children = list(self.geom_list_container.get_children())
-			for ch in children:
-				self.geom_list_container.remove_child(ch)
+			self.list_view.set_items(items)
 		except Exception:
-			# If removal fails for some child, ignore and continue building fresh rows
+			# Some builds require clearing via setting again
+			self.list_view.set_items([])
+			self.list_view.set_items(items)
+		# Keep selection in range
+		if not (0 <= self.sel_index < len(self.selected_geoms)):
+			self.sel_index = -1 if not self.selected_geoms else 0
+		try:
+			self.list_view.selected_index = self.sel_index if self.sel_index >= 0 else -1
+		except Exception:
 			pass
-		for i, entry in enumerate(self.selected_geoms):
-			row = gui.Horiz()
-			label = gui.Label(entry["display"])
-			row.add_child(label)
-			row.add_stretch()
-			# Wireframe toggle for meshes
-			if entry["type"] == "mesh":
-				chk = gui.Checkbox("Wireframe")
-				chk.checked = bool(entry["options"].get("wireframe", False))
-				def _on_chk(_checked, idx=i):
-					self.selected_geoms[idx]["options"]["wireframe"] = bool(chk.checked)
-					self._render_selected_lineup()
-				chk.set_on_checked(_on_chk)
-				row.add_child(chk)
-			# Reorder buttons
-			btn_up = gui.Button("↑")
-			btn_down = gui.Button("↓")
-			def _move(delta, idx=i):
-				new_idx = idx + delta
-				if 0 <= new_idx < len(self.selected_geoms):
-					self.selected_geoms[idx], self.selected_geoms[new_idx] = self.selected_geoms[new_idx], self.selected_geoms[idx]
-					self._rebuild_geom_list_ui()
-					self._render_selected_lineup()
-			btn_up.set_on_clicked(lambda idx=i: _move(-1, idx))
-			btn_down.set_on_clicked(lambda idx=i: _move(1, idx))
-			row.add_child(btn_up)
-			row.add_child(btn_down)
-			# Remove button
-			btn_rm = gui.Button("Remove")
-			def _rm(idx=i):
-				self.selected_geoms.pop(idx)
-				self._rebuild_geom_list_ui()
-				self._render_selected_lineup()
-			btn_rm.set_on_clicked(lambda idx=i: _rm(idx))
-			row.add_child(btn_rm)
-			self.geom_list_container.add_child(row)
+		self._sync_controls()
+		try:
+			self.window.set_needs_layout()
+		except Exception:
+			pass
 
-	def _load_geometry_from_path(self, path: str):
-		# Route based on file extension to avoid spurious warnings (e.g., OBJ as point cloud)
-		ext = Path(path).suffix.lower()
-		pcd_exts = {".ply", ".pcd", ".xyz"}
-		mesh_exts = {".obj", ".stl", ".off", ".gltf", ".glb"}
-		if ext in pcd_exts:
-			self._load_pointcloud_from_path(path)
-			return
-		if ext in mesh_exts:
-			self._load_mesh_from_path(path)
-			return
-		# Unknown or no extension: try tensor point cloud then mesh as fallback
+	def _on_list_selection_changed(self, *args):
+		# Determine selected index from callback or widget state
+		idx = -1
 		try:
-			pcd_t = o3d.t.io.read_point_cloud(path)
-			if pcd_t is not None and pcd_t.point.positions is not None and len(pcd_t.point.positions) > 0:
-				self._load_pointcloud_from_path(path)
-				return
+			if args:
+				idx = int(args[0])
+			else:
+				idx = int(getattr(self.list_view, 'selected_index', -1))
+		except Exception:
+			idx = int(getattr(self.list_view, 'selected_index', -1)) if hasattr(self.list_view, 'selected_index') else -1
+		self.sel_index = idx
+		self._sync_controls()
+
+	# removed old dynamic panel function
+
+	def _move_selected(self, delta: int):
+		idx = self.sel_index
+		new_idx = idx + delta
+		if 0 <= idx < len(self.selected_geoms) and 0 <= new_idx < len(self.selected_geoms):
+			self.selected_geoms[idx], self.selected_geoms[new_idx] = self.selected_geoms[new_idx], self.selected_geoms[idx]
+			self.sel_index = new_idx
+			self._rebuild_geom_list_ui()
+			self._render_selected_lineup()
+
+	def _remove_selected(self):
+		idx = self.sel_index
+		if 0 <= idx < len(self.selected_geoms):
+			self.selected_geoms.pop(idx)
+			# Adjust selection
+			if not self.selected_geoms:
+				self.sel_index = -1
+			elif idx >= len(self.selected_geoms):
+				self.sel_index = len(self.selected_geoms) - 1
+			self._rebuild_geom_list_ui()
+			self._render_selected_lineup()
+
+	def _sync_controls(self):
+		# Enable/disable the fixed controls row based on selection and position
+		N = len(self.selected_geoms)
+		idx = self.sel_index
+		en_has_sel = 0 <= idx < N
+		try:
+			self.btn_remove.enabled = bool(en_has_sel)
+			self.btn_edit.enabled = bool(en_has_sel)
+			self.btn_up.enabled = bool(en_has_sel and idx > 0)
+			self.btn_down.enabled = bool(en_has_sel and idx < N - 1)
 		except Exception:
 			pass
-		self._load_mesh_from_path(path)
+		try:
+			self.window.set_needs_layout()
+		except Exception:
+			pass
 
 	def _on_layout(self, layout_context):
+		# Layout: left scene, right panel; in panel, list view top, controls row bottom
 		r = self.window.content_rect
-		# Scene fills left 3/4, panel on right 1/4
 		panel_width = int(0.28 * r.width)
 		self.scene.frame = gui.Rect(r.x, r.y, r.width - panel_width, r.height)
 		self.panel.frame = gui.Rect(r.get_right() - panel_width, r.y, panel_width, r.height)
+		# Pin list view and controls row regions
+		panel_rect = self.panel.frame
+		margin = 8
+		px = panel_rect.x + margin
+		py = panel_rect.y + margin
+		pw = panel_rect.width - 2 * margin
+		ph = panel_rect.height - 2 * margin
+		controls_h = 48
+		list_h = max(0, ph - controls_h - margin)
+		try:
+			self.list_view.frame = gui.Rect(px, py, pw, list_h)
+		except Exception:
+			pass
+		try:
+			self.controls_row.frame = gui.Rect(px, py + list_h + margin, pw, controls_h)
+		except Exception:
+			pass
 
 	def _clear_scene(self):
 		self.scene.scene.clear_geometry()
@@ -391,7 +451,7 @@ class VisualizationApp:
 
 			self._clear_scene()
 			mat = rendering.MaterialRecord()
-			mat.point_size = float(self.sld_point_size.int_value)
+			mat.point_size = float(self.default_point_size)
 			self.scene.scene.add_geometry("pcd", pcd, mat)
 			bounds = pcd.get_axis_aligned_bounding_box()
 			self.scene.setup_camera(60.0, bounds, bounds.get_center())
@@ -402,9 +462,7 @@ class VisualizationApp:
 		except Exception as e:
 			self._show_message(f"Error loading point cloud: {e}")
 
-	def _on_point_size_change(self, _val):
-		# Re-render lineup to apply point size to all point clouds
-		self._render_selected_lineup()
+
 	def _render_selected_lineup(self):
 		# Clear scene and render each selected geometry side-by-side along +X
 		self.scene.scene.clear_geometry()
@@ -423,7 +481,7 @@ class VisualizationApp:
 					# translate by offset
 					pcd.translate([offset_x, 0.0, 0.0])
 					mat = rendering.MaterialRecord()
-					mat.point_size = float(self.sld_point_size.int_value)
+					mat.point_size = float(self.default_point_size)
 					self.scene.scene.add_geometry(name, pcd, mat)
 				else:
 					mesh = o3d.io.read_triangle_mesh(path)
@@ -463,6 +521,25 @@ class VisualizationApp:
 			# Here we skip heavy picking and just show a generic hint
 			return gui.Widget.EventCallbackResult.HANDLED
 		return gui.Widget.EventCallbackResult.IGNORED
+
+	def _open_edit_dialog(self):
+		# Open a movable editor window via dialogs.mesh_edit
+		idx = self.sel_index
+		if not (0 <= idx < len(self.selected_geoms)):
+			return
+		entry = self.selected_geoms[idx]
+		def _apply_change(_entry):
+			# re-render lineup after any change
+			self._render_selected_lineup()
+		# Keep reference to prevent GC
+		self._last_edit_window = mesh_edit.open_mesh_edit_window(gui.Application.instance, self.window, entry, _apply_change)
+
+	def _on_selected_wireframe(self, _checked):
+		# Update currently selected mesh wireframe option from the fixed checkbox (if used)
+		idx = self.sel_index
+		if 0 <= idx < len(self.selected_geoms) and self.selected_geoms[idx]["type"] == "mesh":
+			self.selected_geoms[idx]["options"]["wireframe"] = bool(self.chk_wireframe_sel.checked)
+			self._render_selected_lineup()
 
 	def _show_message(self, msg: str):
 		# Avoid modal dialogs that can obscure the UI; log to console for now.
