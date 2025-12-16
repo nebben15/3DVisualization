@@ -15,6 +15,7 @@ class SelectedEntry:
         "visible": True,
         "texture": None,
         "texture_enabled": True,
+        "color_mode": "default",  # default | rgb | continuous | position (meshes)
     })
 
 

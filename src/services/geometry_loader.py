@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 import open3d as o3d
-from typing import Optional, Generator
+from typing import Optional, Generator, Tuple
 from typing import Optional
 import numpy as np
 import open3d as o3d
@@ -51,6 +51,37 @@ def read_point_positions_fast(path: str) -> Optional[np.ndarray]:
         if pcd is None or pcd.is_empty():
             return None
         return np.asarray(pcd.points)
+    except Exception:
+        return None
+
+def read_point_features_fast(path: str) -> Optional[np.ndarray]:
+    """Return point features as a NumPy array if present.
+    Supports Open3D tensor point clouds with keys 'feat_dim_*' (stacked in order)
+    or a single NxD 'features' attribute. Returns None if no features found.
+    """
+    try:
+        pcd_t = o3d.t.io.read_point_cloud(path)
+        if pcd_t is None or pcd_t.point is None:
+            return None
+        # Collect feature dims
+        keys = list(pcd_t.point.keys())
+        dim_keys = [k for k in keys if k.startswith("feat_dim_")]
+        if dim_keys:
+            # Sort by trailing index
+            dim_keys = sorted(dim_keys, key=lambda k: int(k.split('_')[-1]))
+            cols = [np.asarray(pcd_t.point[k])[:, 0] for k in dim_keys]
+            feats = np.stack(cols, axis=1)
+            return feats
+        if "features" in pcd_t.point:
+            arr = np.asarray(pcd_t.point["features"])
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, 1)
+            return arr
+        # Some datasets may encode RGB in 'colors'
+        if "colors" in pcd_t.point:
+            arr = np.asarray(pcd_t.point.colors)
+            return arr[:, :3]
+        return None
     except Exception:
         return None
 

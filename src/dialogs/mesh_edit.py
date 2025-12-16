@@ -16,6 +16,31 @@ class MeshEditWindow(GeometryEditWindowBase):
         super().__init__(app, title, entry, apply_change)
 
     def _build_ui(self):
+        # Coloring mode selector
+        self._container.add_child(gui.Label("Coloring"))
+        cmb_mode = gui.Combobox()
+        modes = ["Default", "Position (XYZ)"]
+        for m in modes:
+            cmb_mode.add_item(m)
+        current = str(self._entry.get("options", {}).get("color_mode", "default")).lower()
+        idx_map = {"default":0, "position":1}
+        try:
+            cmb_mode.selected_index = idx_map.get(current, 0)
+        except Exception:
+            cmb_mode.selected_index = 0
+
+        def _on_mode_changed(*_):
+            sel = int(getattr(cmb_mode, 'selected_index', 0))
+            val = "default" if sel == 0 else "position"
+            try:
+                self._entry.setdefault("options", {})["color_mode"] = val
+            except Exception:
+                pass
+            self._apply_change(self._entry)
+
+        cmb_mode.set_on_selection_changed(_on_mode_changed)
+        self._container.add_child(cmb_mode)
+
         # Wireframe checkbox (meshes only)
         chk = gui.Checkbox("Wireframe")
         try:
