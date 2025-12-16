@@ -4,19 +4,19 @@ from typing import Callable, Dict, Any
 
 import open3d.visualization.gui as gui
 
+# Prefer relative import; fallback to absolute when running as script
+try:
+    from .base_edit import GeometryEditWindowBase
+except Exception:
+    from dialogs.base_edit import GeometryEditWindowBase
 
-class MeshEditWindow:
+
+class MeshEditWindow(GeometryEditWindowBase):
     def __init__(self, app: gui.Application, title: str, entry: Dict[str, Any], apply_change: Callable[[Dict[str, Any]], None]):
-        self._app = app
-        self._entry = entry
-        self._apply_change = apply_change
-        self._win = app.create_window(title, 380, 280)
-        self._container = gui.Vert(6, gui.Margins(8, 8, 8, 8))
-        self._build_ui()
-        self._win.add_child(self._container)
+        super().__init__(app, title, entry, apply_change)
 
     def _build_ui(self):
-        # Wireframe checkbox for meshes
+        # Wireframe checkbox (meshes only)
         chk = gui.Checkbox("Wireframe")
         try:
             chk.checked = bool(self._entry.get("options", {}).get("wireframe", False))
@@ -34,24 +34,8 @@ class MeshEditWindow:
         chk.set_on_checked(_on_chk)
         self._container.add_child(chk)
 
-        # Scale slider (double) for meshes/pcd
-        self._container.add_child(gui.Label("Scale"))
-        sld = gui.Slider(gui.Slider.DOUBLE)
-        sld.set_limits(0.1, 3.0)
-        try:
-            sld.double_value = float(self._entry.get("options", {}).get("scale", 1.0))
-        except Exception:
-            sld.double_value = 1.0
-
-        def _on_scale(_val):
-            try:
-                self._entry.setdefault("options", {})["scale"] = float(sld.double_value)
-            except Exception:
-                pass
-            self._apply_change(self._entry)
-
-        sld.set_on_value_changed(_on_scale)
-        self._container.add_child(sld)
+        # Scale slider
+        self.add_scale_control()
 
         # Texture selection
         self._container.add_child(gui.Label("Texture"))

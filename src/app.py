@@ -14,10 +14,10 @@ from render.lineup_renderer import render as render_lineup
 
 try:
 	# local dialog modules
-	from .dialogs import mesh_edit
+	from .dialogs import mesh_edit, point_cloud_edit
 except Exception:
 	# fallback when running as script
-	from dialogs import mesh_edit
+	from dialogs import mesh_edit, point_cloud_edit
 
 
 try:
@@ -662,7 +662,10 @@ class VisualizationApp:
 			"options": dict(entry.options),
 		}
 		# Keep reference to prevent GC
-		self._last_edit_window = mesh_edit.open_mesh_edit_window(gui.Application.instance, self.window, legacy_like, _apply_change)
+		if str(entry.type).lower() == "pcd":
+			self._last_edit_window = point_cloud_edit.open_pointcloud_edit_window(gui.Application.instance, self.window, legacy_like, _apply_change)
+		else:
+			self._last_edit_window = mesh_edit.open_mesh_edit_window(gui.Application.instance, self.window, legacy_like, _apply_change)
 
 	def _on_selected_wireframe(self, _checked):
 		# Deprecated: wireframe is controlled via Edit dialog only
