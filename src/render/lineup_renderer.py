@@ -18,11 +18,24 @@ def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_s
     for i, entry in enumerate(selection):
         name = f"geom_{i}"
         try:
+            # Skip entries still loading to avoid blocking UI
+            if bool(entry.options.get("loading", False)):
+                continue
             # Skip rendering if entry is hidden
             if not bool(entry.options.get("visible", True)):
                 continue
             if entry.type == "pcd":
-                pcd = load_pointcloud(entry.path)
+                # Support progressive rendering via 'progress_positions' option
+                prog = entry.options.get("progress_positions", None)
+                if prog is not None:
+                    try:
+                        import numpy as np
+                        pts = np.asarray(prog)
+                        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+                    except Exception:
+                        pcd = load_pointcloud(entry.path)
+                else:
+                    pcd = load_pointcloud(entry.path)
                 if not pcd:
                     continue
                 # Apply scale around center if provided

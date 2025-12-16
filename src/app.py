@@ -1,6 +1,7 @@
 import argparse
 import os
 from pathlib import Path
+import threading
 
 import numpy as np
 import open3d as o3d
@@ -272,19 +273,91 @@ class VisualizationApp:
 		adj_idx = idx - 1
 		if 0 <= adj_idx < len(self.geom_index):
 			display, path, gtype = self.geom_index[adj_idx]
-			# Add to selection model
-			self.selection.add(SelectedEntry(display=display, path=path, type=gtype, options={
-				"wireframe": bool(self.default_wireframe),
-				"scale": 1.0,
-				"visible": True,
-				"texture": None,
-				"texture_enabled": True,
-			}))
+			# Determine if we should mark as loading (point clouds can be heavy)
+			is_pcd = (gtype == 'pcd')
+			entry = SelectedEntry(
+				display=display,
+				path=path,
+				type=gtype,
+				options={
+					"wireframe": bool(self.default_wireframe),
+					"scale": 1.0,
+					"visible": True,
+					"texture": None,
+					"texture_enabled": True,
+					"loading": True if is_pcd else False,
+				},
+			)
+			self.selection.add(entry)
 			# Update current selection index to the newly added item
 			self.sel_index = len(self.selection.items) - 1 if self.selection.items else -1
-			gui.Application.instance.post_to_main_thread(self.window, lambda: (self._rebuild_geom_list_ui(), self._render_selected_lineup(camera_preserve=False)))
+			# Update UI immediately; for meshes, render right away; for pcd, show loading and warm cache in background
+			def _after_add():
+				self._rebuild_geom_list_ui()
+				if not is_pcd:
+					self._render_selected_lineup(camera_preserve=False)
+				self._sync_controls()
+			gui.Application.instance.post_to_main_thread(self.window, _after_add)
 			gui.Application.instance.post_to_main_thread(self.window, lambda: setattr(self.cmb_geometry, 'selected_index', 0))
-			gui.Application.instance.post_to_main_thread(self.window, lambda: self._sync_controls())
+			if is_pcd:
+				# Progressive load in background: render partial chunks of ~10k points
+				def _bg_load_progress(path_=path):
+					try:
+						from services.geometry_loader import read_point_positions_fast
+					except Exception:
+						from .services.geometry_loader import read_point_positions_fast
+					pts = read_point_positions_fast(path_)
+					if pts is None or len(pts) == 0:
+						# mark as done (failed) gracefully
+						def _on_fail():
+							for idx_, e in enumerate(self.selection.items):
+								if e.path == path_:
+									opts = dict(e.options)
+									opts["loading"] = False
+									opts.pop("progress_positions", None)
+									self.selection.update_options(idx_, **opts)
+									break
+							self._rebuild_geom_list_ui()
+							self._render_selected_lineup(camera_preserve=False)
+							self._sync_controls()
+						gui.Application.instance.post_to_main_thread(self.window, _on_fail)
+						return
+					# Chunked updates: increase coverage but keep about ~10k points per frame
+					batch = 10000  # advance in 100k increments to reduce UI churn
+					for end in range(batch, len(pts) + batch, batch):
+						cur = min(end, len(pts))
+						# Downsample to ~10k points to avoid large UI payloads
+						stride = max(1, cur // 10000)
+						slice_pts = pts[:cur:stride]
+						def _on_chunk(sp=slice_pts):
+							for idx_, e in enumerate(self.selection.items):
+								if e.path == path_:
+									opts = dict(e.options)
+									opts["progress_positions"] = sp
+									self.selection.update_options(idx_, **opts)
+									break
+							self._render_selected_lineup(camera_preserve=True)
+						gui.Application.instance.post_to_main_thread(self.window, _on_chunk)
+						# Small sleep to avoid overwhelming UI; adjust as needed
+						try:
+							import time; time.sleep(0.02)
+						except Exception:
+							pass
+					# Finalize: clear loading and progress flag
+					def _on_done():
+						for idx_, e in enumerate(self.selection.items):
+							if e.path == path_:
+								opts = dict(e.options)
+								opts["loading"] = False
+								opts.pop("progress_positions", None)
+								self.selection.update_options(idx_, **opts)
+								break
+						self._rebuild_geom_list_ui()
+						# Render once more (full), camera preserved to avoid jumps
+						self._render_selected_lineup(camera_preserve=True)
+						self._sync_controls()
+					gui.Application.instance.post_to_main_thread(self.window, _on_done)
+				threading.Thread(target=_bg_load_progress, daemon=True).start()
 
 	# Deprecated button-based add kept out per new UX
 
@@ -331,7 +404,12 @@ class VisualizationApp:
 
 	def _rebuild_geom_list_ui(self):
 		# Update ListView items and sync controls visibility
-		items = [e.display for e in self.selection.items]
+		items = []
+		for e in self.selection.items:
+			label = e.display
+			if bool(e.options.get("loading", False)):
+				label = f"{label} (loading...)"
+			items.append(label)
 		try:
 			self.list_view.set_items(items)
 		except Exception:

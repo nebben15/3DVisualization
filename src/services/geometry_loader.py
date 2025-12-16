@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 import open3d as o3d
-from typing import Optional
+from typing import Optional, Generator
 from typing import Optional
 import numpy as np
 import open3d as o3d
@@ -37,6 +37,114 @@ def load_pointcloud(path: str) -> Optional[o3d.geometry.PointCloud]:
     if pcd is None or pcd.is_empty():
         return None
     return pcd
+
+def read_point_positions_fast(path: str) -> Optional[np.ndarray]:
+    """Return point positions as a NumPy array as quickly as possible (tensor API preferred)."""
+    try:
+        pcd_t = o3d.t.io.read_point_cloud(path)
+        if pcd_t is not None and pcd_t.point.positions is not None:
+            return np.asarray(pcd_t.point.positions)
+    except Exception:
+        pass
+    try:
+        pcd = o3d.io.read_point_cloud(path)
+        if pcd is None or pcd.is_empty():
+            return None
+        return np.asarray(pcd.points)
+    except Exception:
+        return None
+
+def stream_point_positions(path: str, points_per_chunk: int = 10000) -> Generator[np.ndarray, None, None]:
+    """
+    Stream point positions from simple text formats without loading the entire file.
+    Supports:
+      - .xyz (x y z per line, space-separated)
+      - ASCII .ply with vertex properties including x,y,z
+    For other formats, this generator will yield nothing (caller can fall back to full load).
+    """
+    ext = Path(path).suffix.lower()
+    if ext == ".xyz" or ext == ".txt":
+        buf = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                import numpy as np
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                        buf.append((x, y, z))
+                    except Exception:
+                        continue
+                    if len(buf) >= points_per_chunk:
+                        yield np.asarray(buf, dtype=np.float32)
+                        buf = []
+                if buf:
+                    yield np.asarray(buf, dtype=np.float32)
+        except Exception:
+            return
+        return
+    if ext == ".ply":
+        # Minimal ASCII PLY parser
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                header = []
+                for line in f:
+                    header.append(line.rstrip("\n"))
+                    if line.strip() == "end_header":
+                        break
+                # Parse header
+                fmt_ascii = any(h.startswith("format ascii") for h in header)
+                if not fmt_ascii:
+                    return
+                # Find vertex count and property order
+                vert_count = 0
+                prop_names = []
+                in_vertex = False
+                for h in header:
+                    hs = h.strip().split()
+                    if len(hs) >= 3 and hs[0] == "element" and hs[1] == "vertex":
+                        vert_count = int(hs[2])
+                        in_vertex = True
+                        continue
+                    if in_vertex and len(hs) >= 3 and hs[0] == "property":
+                        prop_names.append(hs[-1])
+                    if len(hs) >= 2 and hs[0] == "element" and hs[1] != "vertex":
+                        in_vertex = False
+                # Determine x,y,z indices
+                try:
+                    ix = prop_names.index("x")
+                    iy = prop_names.index("y")
+                    iz = prop_names.index("z")
+                except Exception:
+                    return
+                # Read vertex lines
+                import numpy as np
+                buf = []
+                read_n = 0
+                for line in f:
+                    if read_n >= vert_count:
+                        break
+                    parts = line.strip().split()
+                    if len(parts) < max(ix, iy, iz) + 1:
+                        continue
+                    try:
+                        x, y, z = float(parts[ix]), float(parts[iy]), float(parts[iz])
+                        buf.append((x, y, z))
+                        read_n += 1
+                    except Exception:
+                        continue
+                    if len(buf) >= points_per_chunk:
+                        yield np.asarray(buf, dtype=np.float32)
+                        buf = []
+                if buf:
+                    yield np.asarray(buf, dtype=np.float32)
+        except Exception:
+            return
+        return
+    # Unsupported for streaming; caller should fall back
+    return
 
 
 def to_lineset(mesh: o3d.geometry.TriangleMesh) -> Optional[o3d.geometry.LineSet]:
