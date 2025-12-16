@@ -134,6 +134,11 @@ class VisualizationApp:
 		self.btn_toggle_visible = gui.Button("Hide")
 		self.btn_toggle_visible.set_on_clicked(self._on_toggle_visible)
 		self.controls_row.add_child(self.btn_toggle_visible)
+		# Overlay toggle: render all geometries at the same origin for comparison
+		self.overlay_mode = False
+		self.btn_overlay = gui.Button("Overlay: Off")
+		self.btn_overlay.set_on_clicked(self._on_toggle_overlay)
+		self.controls_row.add_child(self.btn_overlay)
 		self.controls_row.add_stretch()
 		self.panel.add_child(self.controls_row)
 		# Controls row will sit below the list
@@ -206,25 +211,17 @@ class VisualizationApp:
 		return result
 
 	def _refresh_geometry_list(self, *_):
-		# Scrape source_dirs for known geometry files and populate combobox
-		exts = {".ply", ".pcd", ".xyz", ".obj", ".stl", ".off", ".gltf", ".glb"}
-		items = []
-		for d in self.source_dirs:
-			dp = Path(d)
-			if not dp.exists():
-				continue
-			for p in sorted(dp.glob("**/*")):
-				if p.is_file() and p.suffix.lower() in exts:
-					display = f"{dp.name}/{p.name}"
-					items.append((display, str(p)))
+		# Use registry service to collect supported files recursively with types
+		try:
+			infos = scan_directories(self.source_dirs)
+		except Exception:
+			infos = []
+		self.geom_index = [(gi.display, gi.path, gi.type) for gi in infos]
 		# Update UI
-		self.geom_index = items
 		self.cmb_geometry.clear_items()
-		# Add an empty default option that does nothing when selected
 		self.cmb_geometry.add_item("Select to add")
-		for disp, _ in items:
+		for disp, _, _ in self.geom_index:
 			self.cmb_geometry.add_item(disp)
-		# Default to empty option
 		self.cmb_geometry.selected_index = 0
 			# Do not auto-load to avoid popping error dialogs on startup.
 			# User can pick from the dropdown to load.
@@ -300,15 +297,50 @@ class VisualizationApp:
 			gui.Application.instance.post_to_main_thread(self.window, _after_add)
 			gui.Application.instance.post_to_main_thread(self.window, lambda: setattr(self.cmb_geometry, 'selected_index', 0))
 			if is_pcd:
-				# Progressive load in background: render partial chunks of ~10k points
+				# Progressive load in background: try streaming for text formats; fallback to batched updates
 				def _bg_load_progress(path_=path):
 					try:
-						from services.geometry_loader import read_point_positions_fast
+						from services.geometry_loader import stream_point_positions, read_point_positions_fast
 					except Exception:
-						from .services.geometry_loader import read_point_positions_fast
+						from .services.geometry_loader import stream_point_positions, read_point_positions_fast
+					# First, attempt streaming chunks (for .xyz and ASCII .ply)
+					streamed_any = False
+					max_display = 50000
+					accum = None
+					for chunk in stream_point_positions(path_):
+						streamed_any = True
+						# Append and cap to avoid overwhelming the GUI
+						try:
+							accum = chunk if accum is None else np.vstack((accum, chunk))
+							if len(accum) > max_display:
+								accum = accum[-max_display:]
+						except Exception:
+							accum = chunk
+						def _on_chunk(sp=accum):
+							for idx_, e in enumerate(self.selection.items):
+								if e.path == path_:
+									opts = dict(e.options)
+									opts["progress_positions"] = sp
+									self.selection.update_options(idx_, **opts)
+									break
+							self._render_selected_lineup(camera_preserve=True)
+						gui.Application.instance.post_to_main_thread(self.window, _on_chunk)
+					if streamed_any:
+						def _on_done_stream():
+							for idx_, e in enumerate(self.selection.items):
+								if e.path == path_:
+									opts = dict(e.options)
+									opts["loading"] = False
+									self.selection.update_options(idx_, **opts)
+									break
+							self._rebuild_geom_list_ui()
+							self._render_selected_lineup(camera_preserve=True)
+							self._sync_controls()
+						gui.Application.instance.post_to_main_thread(self.window, _on_done_stream)
+						return
+					# Fallback: read full array, then post downsampled batched updates
 					pts = read_point_positions_fast(path_)
 					if pts is None or len(pts) == 0:
-						# mark as done (failed) gracefully
 						def _on_fail():
 							for idx_, e in enumerate(self.selection.items):
 								if e.path == path_:
@@ -322,11 +354,9 @@ class VisualizationApp:
 							self._sync_controls()
 						gui.Application.instance.post_to_main_thread(self.window, _on_fail)
 						return
-					# Chunked updates: increase coverage but keep about ~10k points per frame
-					batch = 10000  # advance in 100k increments to reduce UI churn
+					batch = 100000
 					for end in range(batch, len(pts) + batch, batch):
 						cur = min(end, len(pts))
-						# Downsample to ~10k points to avoid large UI payloads
 						stride = max(1, cur // 10000)
 						slice_pts = pts[:cur:stride]
 						def _on_chunk(sp=slice_pts):
@@ -338,25 +368,22 @@ class VisualizationApp:
 									break
 							self._render_selected_lineup(camera_preserve=True)
 						gui.Application.instance.post_to_main_thread(self.window, _on_chunk)
-						# Small sleep to avoid overwhelming UI; adjust as needed
 						try:
 							import time; time.sleep(0.02)
 						except Exception:
 							pass
-					# Finalize: clear loading and progress flag
-					def _on_done():
+					def _on_done_fallback():
 						for idx_, e in enumerate(self.selection.items):
 							if e.path == path_:
 								opts = dict(e.options)
 								opts["loading"] = False
-								opts.pop("progress_positions", None)
+								# Keep last progressive sample for display; avoid forced full reload
 								self.selection.update_options(idx_, **opts)
 								break
 						self._rebuild_geom_list_ui()
-						# Render once more (full), camera preserved to avoid jumps
 						self._render_selected_lineup(camera_preserve=True)
 						self._sync_controls()
-					gui.Application.instance.post_to_main_thread(self.window, _on_done)
+					gui.Application.instance.post_to_main_thread(self.window, _on_done_fallback)
 				threading.Thread(target=_bg_load_progress, daemon=True).start()
 
 	# Deprecated button-based add kept out per new UX
@@ -457,7 +484,7 @@ class VisualizationApp:
 		except Exception:
 			point_size = 3.0
 		# Delegate rendering
-		render_lineup(self.scene.scene, entries, point_size, preserve_camera=camera_preserve)
+		render_lineup(self.scene.scene, entries, point_size, preserve_camera=camera_preserve, overlay=self.overlay_mode)
 		# Fit camera if not preserved
 		if not camera_preserve:
 			try:
@@ -480,6 +507,8 @@ class VisualizationApp:
 				self.btn_toggle_visible.text = "Hide" if vis else "Show"
 			self.btn_up.enabled = bool(en_has_sel and idx > 0)
 			self.btn_down.enabled = bool(en_has_sel and idx < N - 1)
+			# Overlay button reflects global overlay mode
+			self.btn_overlay.text = "Overlay: On" if self.overlay_mode else "Overlay: Off"
 			# No inline wireframe checkbox; wireframe is controlled via Edit dialog
 		except Exception:
 			pass
@@ -638,6 +667,12 @@ class VisualizationApp:
 	def _on_selected_wireframe(self, _checked):
 		# Deprecated: wireframe is controlled via Edit dialog only
 		return
+
+	def _on_toggle_overlay(self):
+		# Toggle overlay mode and re-render
+		self.overlay_mode = not bool(self.overlay_mode)
+		self._sync_controls()
+		self._render_selected_lineup(camera_preserve=True)
 
 	def _show_message(self, msg: str):
 		# Avoid modal dialogs that can obscure the UI; log to console for now.

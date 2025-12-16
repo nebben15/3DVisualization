@@ -11,7 +11,7 @@ except Exception:
     from services.geometry_loader import load_mesh, load_pointcloud, to_lineset, load_texture_image, find_textures, find_obj_mtl_texture
 
 
-def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_size: float, preserve_camera: bool = False) -> None:
+def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_size: float, preserve_camera: bool = False, overlay: bool = False) -> None:
     scene.clear_geometry()
     offset_x = 0.0
     gap = 1.5
@@ -144,7 +144,9 @@ def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_s
                     scene.add_geometry(name, mesh, mat)
                 bb = mesh.get_axis_aligned_bounding_box()
             w = (bb.get_max_bound() - bb.get_min_bound())[0]
-            offset_x += w + gap
+            # In overlay mode, do not advance offset; stack at origin for comparison
+            if not overlay:
+                offset_x += w + gap
         except Exception as e:
             print(f"[Renderer] Error rendering {entry.path}: {e}")
     if not preserve_camera:
