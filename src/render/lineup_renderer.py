@@ -27,10 +27,9 @@ except Exception:
     )
 
 
-def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_size: float, preserve_camera: bool = False, overlay: bool = False) -> None:
+def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_size: float, preserve_camera: bool = False, overlay: bool = False, gap: float = 1.5) -> None:
     scene.clear_geometry()
     offset_x = 0.0
-    gap = 1.5
     for i, entry in enumerate(selection):
         name = f"geom_{i}"
         try:

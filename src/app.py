@@ -118,6 +118,13 @@ class VisualizationApp:
 		self.scene.set_on_mouse(self._on_mouse)
 
 		# Light controls: azimuth and elevation
+		# Spacing control: distance between rendered geometries
+		self.sld_spacing = gui.Slider(gui.Slider.DOUBLE)
+		self.sld_spacing.set_limits(0.0, 10.0)
+		self.sld_spacing.double_value = 1.5
+		self.sld_spacing.set_on_value_changed(self._on_spacing_changed)
+		self.spacing_gap = 1.5
+
 		self.sld_light_az = gui.Slider(gui.Slider.INT)
 		self.sld_light_az.set_limits(0, 360)
 		self.sld_light_az.int_value = 45
@@ -170,6 +177,13 @@ class VisualizationApp:
 		# Controls row will sit below the list
 		# Light controls UI
 		self.panel.add_child(gui.Label(""))
+		# Spacing slider above light controls
+		try:
+			self.panel.add_child(gui.Label("Spacing between geometries"))
+			self.panel.add_child(self.sld_spacing)
+			self.panel.add_child(gui.Label(""))
+		except Exception:
+			pass
 		self.panel.add_child(gui.Label("Light Azimuth (deg)"))
 		self.panel.add_child(self.sld_light_az)
 		self.panel.add_child(gui.Label("Light Elevation (deg)"))
@@ -546,7 +560,7 @@ class VisualizationApp:
 		except Exception:
 			point_size = 3.0
 		# Delegate rendering
-		render_lineup(self.scene.scene, entries, point_size, preserve_camera=camera_preserve, overlay=self.overlay_mode)
+		render_lineup(self.scene.scene, entries, point_size, preserve_camera=camera_preserve, overlay=self.overlay_mode, gap=float(getattr(self, 'spacing_gap', 1.5)))
 		# Fit camera if not preserved
 		if not camera_preserve:
 			try:
@@ -554,6 +568,14 @@ class VisualizationApp:
 				self.scene.setup_camera(60.0, bounds, bounds.get_center())
 			except Exception:
 				pass
+
+	def _on_spacing_changed(self, _val):
+		try:
+			self.spacing_gap = float(getattr(self.sld_spacing, 'double_value', 1.5))
+		except Exception:
+			self.spacing_gap = 1.5
+		# Re-render with preserved camera
+		self._render_selected_lineup(camera_preserve=True)
 
 	def _sync_controls(self):
 		# Enable/disable the fixed controls row based on selection and position
