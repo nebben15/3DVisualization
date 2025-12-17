@@ -15,9 +15,11 @@ class PointCloudEditWindow(GeometryEditWindowBase):
         super().__init__(app, title, entry, apply_change)
 
     def _build_ui(self):
-        # Inspect header to determine available coloring options
+        # Inspect header to determine available coloring options and info
         has_rgb = False
         has_feats3 = False
+        feat_count = 0
+        point_count = 0
         p = str(self._entry.get("path", ""))
         if p.lower().endswith(".ply"):
             try:
@@ -28,27 +30,49 @@ class PointCloudEditWindow(GeometryEditWindowBase):
                 has_rgb, has_feats3 = inspect_ply_header_modes(p)
             except Exception:
                 pass
-        else:
-            # Fallback: attempt to infer features via a quick read (for non-PLY)
+        # Attempt to read positions to determine point count (works for any format)
+        try:
             try:
-                try:
-                    from services.geometry_loader import read_point_features_fast
-                except Exception:
-                    from ..services.geometry_loader import read_point_features_fast
-                feats = read_point_features_fast(p)
-                if feats is not None:
-                    import numpy as np
-                    arr = np.asarray(feats)
-                    if arr.ndim == 2 and arr.shape[1] == 3:
-                        has_feats3 = True
+                from services.geometry_loader import read_point_positions_fast
             except Exception:
-                pass
+                from ..services.geometry_loader import read_point_positions_fast
+            pos = read_point_positions_fast(p)
+            if pos is not None:
+                import numpy as np
+                PA = np.asarray(pos)
+                point_count = int(PA.shape[0])
+        except Exception:
+            pass
+        # Attempt to read features to determine dimension count (works for any format)
+        try:
+            try:
+                from services.geometry_loader import read_point_features_fast
+            except Exception:
+                from ..services.geometry_loader import read_point_features_fast
+            feats = read_point_features_fast(p)
+            if feats is not None:
+                import numpy as np
+                arr = np.asarray(feats)
+                if arr.ndim == 2:
+                    feat_count = int(arr.shape[1])
+                elif arr.ndim == 1:
+                    feat_count = 1
+        except Exception:
+            pass
+        # If we detected >=3 feature dims, enable 3D feature coloring
+        if feat_count >= 3:
+            has_feats3 = True
 
-        # Show detected availability
-        status = []
-        status.append(f"RGB: {'yes' if has_rgb else 'no'}")
-        status.append(f"3D features: {'yes' if has_feats3 else 'no'}")
-        self._container.add_child(gui.Label("Detected -> " + ", ".join(status)))
+        # Info section
+        info = []
+        info.append(f"Points: {point_count}")
+        info.append(f"RGB: {'yes' if has_rgb else 'no'}")
+        info.append(f"Feature dims: {feat_count}")
+        self._container.add_child(gui.Label("Info"))
+        for ln in info:
+            self._container.add_child(gui.Label(ln))
+        # Spacer
+        self._container.add_child(gui.Label(""))
 
         # Coloring mode selector
         self._container.add_child(gui.Label("Coloring"))

@@ -16,6 +16,34 @@ class MeshEditWindow(GeometryEditWindowBase):
         super().__init__(app, title, entry, apply_change)
 
     def _build_ui(self):
+        # Info section: number of vertices and whether a texture is linked in the mesh file
+        try:
+            try:
+                from services.geometry_loader import load_mesh, find_obj_mtl_texture
+            except Exception:
+                from ..services.geometry_loader import load_mesh, find_obj_mtl_texture
+            m = load_mesh(self._entry.get("path", ""))
+            vcount = int(len(m.vertices)) if m is not None else 0
+            tex_link = None
+            try:
+                tex_link = find_obj_mtl_texture(self._entry.get("path", ""))
+            except Exception:
+                tex_link = None
+            info_lines = []
+            info_lines.append(f"Vertices: {vcount}")
+            if tex_link:
+                from pathlib import Path as _P
+                info_lines.append(f"Texture linked: Yes ({_P(tex_link).name})")
+            else:
+                info_lines.append("Texture linked: No")
+            self._container.add_child(gui.Label("Info"))
+            for ln in info_lines:
+                self._container.add_child(gui.Label(ln))
+            # Spacer
+            self._container.add_child(gui.Label(""))
+        except Exception:
+            pass
+
         # Coloring mode selector
         self._container.add_child(gui.Label("Coloring"))
         cmb_mode = gui.Combobox()

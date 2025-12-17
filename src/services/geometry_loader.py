@@ -5,6 +5,7 @@ from typing import Optional, Generator, Tuple
 from typing import Optional
 import numpy as np
 import open3d as o3d
+import struct
 
 
 @lru_cache(maxsize=128)
@@ -66,50 +67,70 @@ def read_point_positions_fast(path: str) -> Optional[np.ndarray]:
 
 def read_point_features_fast(path: str) -> Optional[np.ndarray]:
     """Return point features as a NumPy array if present.
-    Supports Open3D tensor point clouds with keys 'feat_dim_*' (stacked in order)
-    or a single NxD 'features' attribute. Returns None if no features found.
+    Order of preference:
+      1) Open3D Tensor point cloud: stack 'feat_dim_*' (sorted by numeric suffix), else 'features', else 'colors'
+      2) Legacy point cloud: 'colors' (Nx3)
+      3) Fallback: parse binary_little_endian PLY header for 'feat_dim_*' and read them
+    Returns None if no features were found.
     """
-    # Try tensor API first
+    # 1) Tensor API
     try:
         pcd_t = o3d.t.io.read_point_cloud(path)
         if pcd_t is not None and getattr(pcd_t, 'point', None) is not None:
             keys = list(pcd_t.point.keys())
-            # Collect custom feature dims
             dim_keys = [k for k in keys if k.startswith("feat_dim_")]
             if dim_keys:
-                dim_keys = sorted(dim_keys, key=lambda k: int(k.split('_')[-1]))
-                cols = [np.asarray(pcd_t.point[k])[:, 0] for k in dim_keys]
-                feats = np.stack(cols, axis=1)
+                try:
+                    dim_keys = sorted(dim_keys, key=lambda k: int(k.split('_')[-1]))
+                except Exception:
+                    dim_keys = sorted(dim_keys)
+                cols = []
+                for k in dim_keys:
+                    arr = np.asarray(pcd_t.point[k])
+                    if arr.ndim == 2 and arr.shape[1] >= 1:
+                        cols.append(arr[:, 0])
+                    elif arr.ndim == 1:
+                        cols.append(arr)
+                    else:
+                        cols.append(arr.reshape(-1))
+                try:
+                    feats = np.stack(cols, axis=1)
+                except Exception:
+                    feats = np.concatenate([c.reshape(-1, 1) for c in cols], axis=1)
                 return feats
             if "features" in pcd_t.point:
                 arr = np.asarray(pcd_t.point["features"])
                 if arr.ndim == 1:
                     arr = arr.reshape(-1, 1)
                 return arr
-            # Fallback: use colors if present
             if "colors" in pcd_t.point:
                 arr = np.asarray(pcd_t.point.colors)
-                # Ensure Nx3
                 if arr.ndim == 2 and arr.shape[1] >= 3:
                     return arr[:, :3]
     except Exception:
         pass
-    # Legacy API fallback
+    # 2) Legacy colors
     try:
         pcd = o3d.io.read_point_cloud(path)
-        if pcd is None or pcd.is_empty():
-            return None
-        # Use legacy colors if available
-        try:
-            cols = np.asarray(pcd.colors)
-            if cols.ndim == 2 and cols.shape[1] >= 3 and cols.size > 0:
-                return cols[:, :3]
-        except Exception:
-            pass
-        # No features found
-        return None
+        if pcd is not None and not pcd.is_empty():
+            try:
+                cols = np.asarray(pcd.colors)
+                if cols.ndim == 2 and cols.shape[1] >= 3 and cols.size > 0:
+                    return cols[:, :3]
+            except Exception:
+                pass
     except Exception:
-        return None
+        pass
+    # 3) Fallback: parse binary little-endian PLY features
+    try:
+        p = Path(path)
+        if p.suffix.lower() == ".ply":
+            feats = _read_ply_features_binary_little_endian(path)
+            if isinstance(feats, np.ndarray) and feats.size > 0:
+                return feats
+    except Exception:
+        pass
+    return None
 
 def stream_point_positions(path: str, points_per_chunk: int = 10000) -> Generator[np.ndarray, None, None]:
     """
@@ -306,3 +327,94 @@ def inspect_ply_header_modes(path: str) -> Tuple[bool, bool]:
     except Exception:
         pass
     return has_rgb, has_feats3
+
+
+def _read_ply_features_binary_little_endian(path: str) -> Optional[np.ndarray]:
+    """Read feature dimensions from a binary_little_endian PLY file.
+    Returns an NxD float32 array of feature values where D is the number of feat_dim_* properties.
+    Only supports fixed-size scalar properties in the vertex element. Faces/other elements ignored.
+    """
+    try:
+        with open(path, "rb") as f:
+            header_lines = []
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                header_lines.append(line.decode("utf-8", errors="ignore").rstrip("\n"))
+                if line.strip() == b"end_header":
+                    break
+            # Parse header
+            fmt = None
+            vert_count = 0
+            prop_names = []
+            prop_types = []
+            in_vertex = False
+            for h in header_lines:
+                hs = h.strip().split()
+                if not hs:
+                    continue
+                if hs[0] == "format" and len(hs) >= 2:
+                    fmt = hs[1]
+                if hs[0] == "element" and len(hs) >= 3 and hs[1] == "vertex":
+                    vert_count = int(hs[2])
+                    in_vertex = True
+                    continue
+                if hs[0] == "element" and hs[1] != "vertex":
+                    in_vertex = False
+                if in_vertex and hs[0] == "property":
+                    # Skip list properties in vertex (not expected for features)
+                    if len(hs) >= 4 and hs[1] == "list":
+                        # Unsupported in this minimal reader; ignore
+                        continue
+                    if len(hs) >= 3:
+                        ptype, pname = hs[1], hs[2]
+                        prop_types.append(ptype)
+                        prop_names.append(pname)
+            if fmt != "binary_little_endian" or vert_count <= 0:
+                return None
+            # Build struct format and indices for features
+            type_map = {
+                "char": "b", "uchar": "B",
+                "short": "h", "ushort": "H",
+                "int": "i", "uint": "I",
+                "float": "f", "double": "d",
+            }
+            fmt_codes = []
+            sizes = {
+                "b": 1, "B": 1,
+                "h": 2, "H": 2,
+                "i": 4, "I": 4,
+                "f": 4, "d": 8,
+            }
+            feat_indices = []
+            for i, t in enumerate(prop_types):
+                code = type_map.get(t)
+                if not code:
+                    return None
+                fmt_codes.append(code)
+                if prop_names[i].startswith("feat_dim_"):
+                    feat_indices.append(i)
+            if not feat_indices:
+                # No features in header
+                return None
+            stride = sum(sizes[c] for c in fmt_codes)
+            # Read vertex block
+            data_start = f.tell()
+            buf = f.read(vert_count * stride)
+            if len(buf) < vert_count * stride:
+                # Truncated
+                return None
+            # Unpack iteratively (small N is fine)
+            row_fmt = "<" + "".join(fmt_codes)
+            out = []
+            off = 0
+            for _ in range(vert_count):
+                chunk = buf[off:off+stride]
+                vals = struct.unpack(row_fmt, chunk)
+                out.append([float(vals[j]) for j in feat_indices])
+                off += stride
+            arr = np.asarray(out, dtype=np.float32)
+            return arr
+    except Exception:
+        return None
