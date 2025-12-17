@@ -62,6 +62,48 @@ class MeshEditWindow(GeometryEditWindowBase):
         # Scale slider
         self.add_scale_control()
 
+        # Histogram controls: bins and button
+        self._container.add_child(gui.Label("Histogram bins"))
+        sld_bins = gui.Slider(gui.Slider.INT)
+        sld_bins.set_limits(5, 128)
+        try:
+            sld_bins.int_value = int(self._entry.get("options", {}).get("hist_bins", 32))
+        except Exception:
+            sld_bins.int_value = 32
+
+        def _on_bins_changed(_val):
+            try:
+                self._entry.setdefault("options", {})["hist_bins"] = int(sld_bins.int_value)
+            except Exception:
+                pass
+            # No need to re-render scene; bins affect histogram window only
+
+        sld_bins.set_on_value_changed(_on_bins_changed)
+        self._container.add_child(sld_bins)
+
+        btn_hist = gui.Button("Show Histogram")
+        def _on_hist():
+            try:
+                # Lazy import to avoid cyclic dependencies
+                try:
+                    from .histogram_window import open_histogram_window
+                except Exception:
+                    from dialogs.histogram_window import open_histogram_window
+                bins = int(self._entry.get("options", {}).get("hist_bins", 32))
+                try:
+                    print(f"[MeshEdit] Opening histogram: path={self._entry.get('path','')}, bins={bins}")
+                except Exception:
+                    pass
+                # Keep a reference so the window is not garbage-collected
+                self._hist_window = open_histogram_window(self._app, self._win, self._entry, bins)
+            except Exception as e:
+                try:
+                    print(f"[MeshEdit] Failed to open histogram window: {e}")
+                except Exception:
+                    pass
+        btn_hist.set_on_clicked(_on_hist)
+        self._container.add_child(btn_hist)
+
         # Texture selection
         self._container.add_child(gui.Label("Texture"))
         cmb = gui.Combobox()

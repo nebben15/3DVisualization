@@ -11,6 +11,10 @@ import open3d.visualization.rendering as rendering
 from models.selection import SelectionList, SelectedEntry
 from services.geometry_registry import scan_directories
 from render.lineup_renderer import render as render_lineup
+try:
+	from .dialogs.histogram_window import close_hist_windows_for, close_all_hist_windows
+except Exception:
+	from dialogs.histogram_window import close_hist_windows_for, close_all_hist_windows
 
 try:
 	# local dialog modules
@@ -44,6 +48,28 @@ class VisualizationApp:
 		except Exception:
 			pass
 		self.window.add_child(self.scene)
+		# Attempt to close auxiliary windows on main window close
+		try:
+			def _on_main_close():
+				try:
+					close_all_hist_windows()
+				except Exception:
+					pass
+				# Close any open edit windows
+				try:
+					for ew in list(getattr(self, "_edit_windows", [])):
+						win = getattr(ew, "_win", None) or ew
+						win.close()
+					self._edit_windows = []
+				except Exception:
+					pass
+				return True
+			self.window.set_on_close(_on_main_close)
+		except Exception:
+			pass
+
+		# Track child windows (edit dialogs)
+		self._edit_windows = []
 
 		# Right panel for controls
 		em = self.window.theme.font_size
@@ -389,6 +415,19 @@ class VisualizationApp:
 	# Deprecated button-based add kept out per new UX
 
 	def _on_clear_selected(self):
+		# Close any histogram windows first
+		try:
+			close_all_hist_windows()
+		except Exception:
+			pass
+		# Close any edit windows
+		try:
+			for ew in list(getattr(self, "_edit_windows", [])):
+				win = getattr(ew, "_win", None) or ew
+				gui.Application.instance.post_to_main_thread(self.window, lambda w=win: w.close())
+			self._edit_windows = []
+		except Exception:
+			pass
 		self.selection.items.clear()
 		self.sel_index = -1
 		self._clear_scene()
@@ -409,6 +448,29 @@ class VisualizationApp:
 		# Remove currently selected entry (selection model)
 		idx = self.sel_index
 		if 0 <= idx < len(self.selection.items):
+			# Close any histogram windows associated with this entry
+			try:
+				path = self.selection.items[idx].path
+				close_hist_windows_for(path)
+			except Exception:
+				pass
+			# Close any edit windows associated with this entry
+			try:
+				path = self.selection.items[idx].path
+				remaining = []
+				for ew in list(getattr(self, "_edit_windows", [])):
+					try:
+						p = str(getattr(ew, "_entry", {}).get("path", ""))
+						if p == str(path):
+							win = getattr(ew, "_win", None) or ew
+							gui.Application.instance.post_to_main_thread(self.window, lambda w=win: w.close())
+						else:
+							remaining.append(ew)
+					except Exception:
+						remaining.append(ew)
+				self._edit_windows = remaining
+			except Exception:
+				pass
 			self.selection.remove_at(idx)
 			# Adjust selection
 			if not self.selection.items:
@@ -419,7 +481,7 @@ class VisualizationApp:
 			try:
 				if getattr(self, "_last_edit_window", None):
 					win = getattr(self._last_edit_window, "_win", None) or self._last_edit_window
-					gui.Application.instance.close_window(win)
+					gui.Application.instance.post_to_main_thread(self.window, lambda w=win: w.close())
 					self._last_edit_window = None
 			except Exception:
 				self._last_edit_window = None
@@ -666,6 +728,11 @@ class VisualizationApp:
 			self._last_edit_window = point_cloud_edit.open_pointcloud_edit_window(gui.Application.instance, self.window, legacy_like, _apply_change)
 		else:
 			self._last_edit_window = mesh_edit.open_mesh_edit_window(gui.Application.instance, self.window, legacy_like, _apply_change)
+		# Track window for later cleanup
+		try:
+			self._edit_windows.append(self._last_edit_window)
+		except Exception:
+			pass
 
 	def _on_selected_wireframe(self, _checked):
 		# Deprecated: wireframe is controlled via Edit dialog only

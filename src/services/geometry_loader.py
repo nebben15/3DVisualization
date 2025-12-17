@@ -43,14 +43,24 @@ def read_point_positions_fast(path: str) -> Optional[np.ndarray]:
     try:
         pcd_t = o3d.t.io.read_point_cloud(path)
         if pcd_t is not None and pcd_t.point.positions is not None:
-            return np.asarray(pcd_t.point.positions)
+            try:
+                return pcd_t.point.positions.numpy()
+            except Exception:
+                return np.asarray(pcd_t.point.positions)
     except Exception:
         pass
     try:
         pcd = o3d.io.read_point_cloud(path)
         if pcd is None or pcd.is_empty():
             return None
-        return np.asarray(pcd.points)
+        P = np.asarray(pcd.points)
+        # Ensure numeric 2D
+        if P.ndim == 1:
+            try:
+                P = np.vstack([np.array(x).ravel() for x in P]).astype(np.float32, copy=False)
+            except Exception:
+                P = P.reshape(-1, 3)
+        return P
     except Exception:
         return None
 

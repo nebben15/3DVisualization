@@ -12,3 +12,6 @@ Pillow>=10.0
 
 # GLTF helpers (optional; Open3D reads GLTF/GLB directly, this is only for edge cases)
 pygltflib>=1.15
+
+# Plotting for histograms
+matplotlib>=3.7
