@@ -59,28 +59,44 @@ def read_point_features_fast(path: str) -> Optional[np.ndarray]:
     Supports Open3D tensor point clouds with keys 'feat_dim_*' (stacked in order)
     or a single NxD 'features' attribute. Returns None if no features found.
     """
+    # Try tensor API first
     try:
         pcd_t = o3d.t.io.read_point_cloud(path)
-        if pcd_t is None or pcd_t.point is None:
+        if pcd_t is not None and getattr(pcd_t, 'point', None) is not None:
+            keys = list(pcd_t.point.keys())
+            # Collect custom feature dims
+            dim_keys = [k for k in keys if k.startswith("feat_dim_")]
+            if dim_keys:
+                dim_keys = sorted(dim_keys, key=lambda k: int(k.split('_')[-1]))
+                cols = [np.asarray(pcd_t.point[k])[:, 0] for k in dim_keys]
+                feats = np.stack(cols, axis=1)
+                return feats
+            if "features" in pcd_t.point:
+                arr = np.asarray(pcd_t.point["features"])
+                if arr.ndim == 1:
+                    arr = arr.reshape(-1, 1)
+                return arr
+            # Fallback: use colors if present
+            if "colors" in pcd_t.point:
+                arr = np.asarray(pcd_t.point.colors)
+                # Ensure Nx3
+                if arr.ndim == 2 and arr.shape[1] >= 3:
+                    return arr[:, :3]
+    except Exception:
+        pass
+    # Legacy API fallback
+    try:
+        pcd = o3d.io.read_point_cloud(path)
+        if pcd is None or pcd.is_empty():
             return None
-        # Collect feature dims
-        keys = list(pcd_t.point.keys())
-        dim_keys = [k for k in keys if k.startswith("feat_dim_")]
-        if dim_keys:
-            # Sort by trailing index
-            dim_keys = sorted(dim_keys, key=lambda k: int(k.split('_')[-1]))
-            cols = [np.asarray(pcd_t.point[k])[:, 0] for k in dim_keys]
-            feats = np.stack(cols, axis=1)
-            return feats
-        if "features" in pcd_t.point:
-            arr = np.asarray(pcd_t.point["features"])
-            if arr.ndim == 1:
-                arr = arr.reshape(-1, 1)
-            return arr
-        # Some datasets may encode RGB in 'colors'
-        if "colors" in pcd_t.point:
-            arr = np.asarray(pcd_t.point.colors)
-            return arr[:, :3]
+        # Use legacy colors if available
+        try:
+            cols = np.asarray(pcd.colors)
+            if cols.ndim == 2 and cols.shape[1] >= 3 and cols.size > 0:
+                return cols[:, :3]
+        except Exception:
+            pass
+        # No features found
         return None
     except Exception:
         return None
@@ -237,3 +253,46 @@ def find_obj_mtl_texture(mesh_path: str) -> Optional[str]:
     except Exception:
         return None
     return None
+
+def inspect_ply_header_modes(path: str) -> Tuple[bool, bool]:
+    """
+    Inspect PLY header to determine available coloring modes for point clouds.
+    Returns (has_rgb_colors, has_3d_features).
+    - has_rgb_colors: True if header defines vertex properties 'red','green','blue'.
+    - has_3d_features: True if header includes at least three 'feat_dim_*' properties.
+    """
+    has_rgb = False
+    has_feats3 = False
+    try:
+        with open(path, "rb") as f:
+            header_bytes = b""
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                header_bytes += line
+                if line.strip() == b"end_header":
+                    break
+        header = header_bytes.decode("utf-8", errors="ignore").strip().splitlines()
+        prop_names = []
+        in_vertex = False
+        for h in header:
+            hs = h.strip().split()
+            if len(hs) >= 3 and hs[0] == "element" and hs[1] == "vertex":
+                in_vertex = True
+                continue
+            if in_vertex and len(hs) >= 3 and hs[0] == "property":
+                # last token is property name
+                prop_names.append(hs[-1])
+            if len(hs) >= 2 and hs[0] == "element" and hs[1] != "vertex":
+                in_vertex = False
+        names = set(p.lower() for p in prop_names)
+        if {"red", "green", "blue"}.issubset(names):
+            has_rgb = True
+        # Count feat_dim_* occurrences
+        feat_props = [p for p in prop_names if p.startswith("feat_dim_")]
+        if len(feat_props) >= 3:
+            has_feats3 = True
+    except Exception:
+        pass
+    return has_rgb, has_feats3

@@ -56,40 +56,40 @@ def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_s
                     continue
                 # Coloring for point clouds based on options
                 color_mode = str(entry.options.get("color_mode", "default")).lower()
-                if color_mode == "rgb":
-                    # If pcd has colors, keep; otherwise try to pull from tensor 'colors'
-                    pass  # load_pointcloud already tries to populate colors
-                elif color_mode == "continuous" and prog is None:
-                    # Only apply when not in progressive mode (requires full features)
-                    try:
-                        import numpy as np
+                try:
+                    import numpy as np
+                    P = np.asarray(pcd.points)
+                    if color_mode in ("rgb", "continuous"):
                         feats = read_point_features_fast(entry.path)
-                        if feats is not None and len(feats) == len(np.asarray(pcd.points)):
-                            # Map features to RGB
-                            F = feats
-                            if F.ndim == 1:
-                                F = F.reshape(-1, 1)
-                            if F.shape[1] >= 3:
-                                C = F[:, :3].astype(np.float32)
-                                # Min-max per channel
+                        if feats is not None and feats.shape[0] == P.shape[0] and feats.shape[1] == 3:
+                            F = feats.astype(np.float32, copy=False)
+                            if color_mode == "rgb":
+                                # Interpret features directly as RGB. Convert 0..255 to 0..1
+                                # if integer or if float but clearly in 0..255 range.
+                                if np.issubdtype(F.dtype, np.integer) or float(F.max()) > 1.5:
+                                    C = (F / 255.0).clip(0.0, 1.0)
+                                else:
+                                    C = F.clip(0.0, 1.0)
+                                pcd.colors = o3d.utility.Vector3dVector(C)
+                            else:  # continuous: per-channel min-max normalize
+                                C = F.copy()
                                 for c in range(3):
                                     mn, mx = float(C[:, c].min()), float(C[:, c].max())
                                     if mx > mn:
                                         C[:, c] = (C[:, c] - mn) / (mx - mn)
                                     else:
                                         C[:, c] = 0.5
-                            else:
-                                # 1D or 2D: expand via simple normalization and padding
-                                C = np.zeros((F.shape[0], 3), dtype=np.float32)
-                                for c in range(min(3, F.shape[1])):
-                                    mn, mx = float(F[:, c].min()), float(F[:, c].max())
-                                    if mx > mn:
-                                        C[:, c] = (F[:, c] - mn) / (mx - mn)
-                                    else:
-                                        C[:, c] = 0.5
-                            pcd.colors = o3d.utility.Vector3dVector(C)
-                    except Exception:
-                        pass
+                                pcd.colors = o3d.utility.Vector3dVector(C)
+                    else:
+                        # Default mode: ignore any existing colors to avoid unintended RGB from header
+                        try:
+                            # Paint uniform neutral grey; Open3D requires setting colors to match point count
+                            grey = np.tile(np.array([[0.8, 0.8, 0.85]], dtype=np.float32), (P.shape[0], 1))
+                            pcd.colors = o3d.utility.Vector3dVector(grey)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 # Apply scale around center if provided
                 scale = float(entry.options.get("scale", 1.0))
                 try:
@@ -100,6 +100,11 @@ def render(scene: rendering.Open3DScene, selection: List[SelectedEntry], point_s
                     pass
                 pcd.translate([offset_x, 0.0, 0.0])
                 mat = rendering.MaterialRecord()
+                # Ensure point colors are rendered; unlit avoids lighting washing out colors
+                try:
+                    mat.shader = "defaultUnlit"
+                except Exception:
+                    pass
                 mat.point_size = float(point_size)
                 scene.add_geometry(name, pcd, mat)
                 bb = pcd.get_axis_aligned_bounding_box()
