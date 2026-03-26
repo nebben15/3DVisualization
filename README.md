@@ -1,14 +1,26 @@
 # 3D Visualization
 
-Simple 3D visualizer for point clouds and meshes based on open3D. Includes some useful features for exploring point correspondence for point clouds. 
+
+Simple 3D visualizer for point clouds and meshes built with Open3D.
+
+The tool was developed to support experiments with 3D geometry and point
+correspondence visualization. It provides an interactive environment for
+inspecting point clouds, meshes, and correspondence relationships.
 ![](images/image.png)
+
+## Technologies
+
+- Python
+- Open3D
+- TriMesh
+- NumPy
 
 ## Features
 
-- 3D model rendering for PCDs and meshes
-- Interactive camera controls
-- Color feature for highlighting correspondence
-- Additional point-features statistics
+- Rendering of point clouds (PCD) and triangle meshes
+- Interactive camera navigation
+- Visual highlighting of point correspondences
+- Visualization of additional point-level statistics
 
 ## Requirements
 
@@ -40,5 +52,6 @@ Simple 3D visualizer for point clouds and meshes based on open3D. Includes some 
 
 ## License
 
-This project is part of a thesis and is provided as-is.
+This project was developed as part of a university thesis project and is
+provided for research and educational purposes.
 
